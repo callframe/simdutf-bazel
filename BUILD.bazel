@@ -37,29 +37,6 @@ config_setting(
     constraint_values = ["@platforms//cpu:x86_64"],
 )
 
-config_setting(
-    name = "cpu_ppc_be",
-    constraint_values = ["@platforms//cpu:ppc"],
-)
-
-config_setting(
-    name = "cpu_ppc64le",
-    constraint_values = ["@platforms//cpu:ppc64le"],
-)
-
-config_setting(
-    name = "cpu_loongarch64",
-    constraint_values = ["@platforms//cpu:loongarch64"],
-)
-
-selects.config_setting_group(
-    name = "cpu_ppc",
-    match_any = [
-        ":cpu_ppc_be",
-        ":cpu_ppc64le",
-    ],
-)
-
 # GCC-on-x86 only: the AVX load/store code-gen workaround.
 selects.config_setting_group(
     name = "gcc_on_x86",
@@ -67,6 +44,12 @@ selects.config_setting_group(
         ":cpu_x86_64",
         ":compiler_gcc",
     ],
+)
+
+# ppc64le is the only PowerPC target where SIMD can be enabled safely by default.
+config_setting(
+    name = "cpu_ppc64le",
+    constraint_values = ["@platforms//cpu:ppc64le"],
 )
 
 ## Feature flags 
@@ -94,10 +77,6 @@ config_setting(
 )
 
 ## Compile options
-##
-## simdutf relies on *runtime dispatch*: every SIMD kernel is compiled on every build and
-## self-targets its instruction set per-function via `#pragma GCC target(...)`, then the
-## best kernel is chosen at runtime via CPUID.
 
 SIMDUTF_COPTS = select({
     # MSVC has no /std:c++17 equivalent spelled the GCC way.
@@ -111,26 +90,14 @@ SIMDUTF_COPTS = select({
     ],
     "//conditions:default": [],
 }) + select({
-    # PowerPC: required to enable the VSX/AltiVec kernel
-    ":cpu_ppc": [
+    # ppc64le only: guaranteed POWER8+, so VSX/AltiVec are always present.
+    ":cpu_ppc64le": [
         "-maltivec",
         "-mvsx",
         "-mcpu=power8",
     ],
     "//conditions:default": [],
-}) + select({
-    # LoongArch: required so __loongarch_sx/__loongarch_asx are defined and LSX/LASX turn on.
-    ":cpu_loongarch64": [
-        "-mlsx",
-        "-mlasx",
-    ],
-    "//conditions:default": [],
 })
-
-# RISC-V note: the RVV kernel has no runtime dispatch and is compile-time gated on the V
-# extension, so we add no `-march` here (a forced `-march=rv64gcv` would yield a binary that
-# only runs on V-capable hardware). riscv64 builds correctly on the scalar fallback; opt into
-# RVV with `--copt=-march=rv64gcv`.
 
 SIMDUTF_LOCAL_DEFINES = select({
     ":with_logging_enabled": ["SIMDUTF_LOGGING=1"],

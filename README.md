@@ -210,11 +210,14 @@ cc_binary(name = "app",   srcs = ["app.cpp"], deps = ["@simdutf//:simdutf"])
 cc_binary(name = "app_c", srcs = ["app.c"],   deps = ["@simdutf//:simdutf"])
 ```
 
-The Bazel build relies on simdutf's runtime CPU dispatch, so no architecture flags are
-needed on x86-64 or arm64. The VSX/AltiVec (PowerPC) and LSX/LASX (LoongArch) kernels are
-enabled automatically based on the target `@platforms//cpu`. RISC-V builds use the portable
-scalar fallback by default; to enable the RVV kernel (which has no runtime guard, so the
-resulting binary requires V-capable hardware), build with `--copt=-march=rv64gcv`.
+On x86-64 and arm64 the Bazel build relies on simdutf's runtime CPU dispatch, so no
+architecture flags are needed. PowerPC, LoongArch and RISC-V have no runtime dispatch (their
+SIMD kernel is selected at build time and then used unconditionally), so SIMD is enabled by
+default only where the target ABI guarantees it: `@platforms//cpu:ppc64le` automatically gets
+`-maltivec -mvsx -mcpu=power8` (every ppc64le CPU is POWER8+). For other PowerPC targets,
+LoongArch, and RISC-V, the portable scalar fallback is used by default; opt into SIMD with
+`--copt`, e.g. `--copt=-mlsx --copt=-mlasx` (LoongArch) or `--copt=-march=rv64gcv`
+(RISC-V RVV — note the resulting binary then requires V-capable hardware).
 
 Two optional feature flags are available: `--//:with_logging` and
 `--//:with_static_initialization`.
