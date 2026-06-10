@@ -1,0 +1,454 @@
+load("@bazel_skylib//lib:selects.bzl", "selects")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc/toolchains:compiler_flag.bzl", "compiler_flag")
+
+## Compiler detection
+
+compiler_flag(name = "compiler")
+
+config_setting(
+    name = "compiler_msvc",
+    flag_values = {":compiler": "msvc-cl"},
+)
+
+config_setting(
+    name = "compiler_clang_cl",
+    flag_values = {":compiler": "clang-cl"},
+)
+
+config_setting(
+    name = "compiler_gcc",
+    flag_values = {":compiler": "gcc"},
+)
+
+selects.config_setting_group(
+    name = "msvc_like",
+    match_any = [
+        ":compiler_msvc",
+        ":compiler_clang_cl",
+    ],
+)
+
+## CPU detection
+
+config_setting(
+    name = "cpu_x86_64",
+    constraint_values = ["@platforms//cpu:x86_64"],
+)
+
+config_setting(
+    name = "cpu_ppc_be",
+    constraint_values = ["@platforms//cpu:ppc"],
+)
+
+config_setting(
+    name = "cpu_ppc64le",
+    constraint_values = ["@platforms//cpu:ppc64le"],
+)
+
+config_setting(
+    name = "cpu_loongarch64",
+    constraint_values = ["@platforms//cpu:loongarch64"],
+)
+
+selects.config_setting_group(
+    name = "cpu_ppc",
+    match_any = [
+        ":cpu_ppc_be",
+        ":cpu_ppc64le",
+    ],
+)
+
+# GCC-on-x86 only: the AVX load/store code-gen workaround.
+selects.config_setting_group(
+    name = "gcc_on_x86",
+    match_all = [
+        ":cpu_x86_64",
+        ":compiler_gcc",
+    ],
+)
+
+## Feature flags 
+
+bool_flag(
+    name = "with_logging",
+    build_setting_default = False,
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "with_logging_enabled",
+    flag_values = {":with_logging": "true"},
+)
+
+bool_flag(
+    name = "with_static_initialization",
+    build_setting_default = False,
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "with_static_initialization_enabled",
+    flag_values = {":with_static_initialization": "true"},
+)
+
+## Compile options
+##
+## simdutf relies on *runtime dispatch*: every SIMD kernel is compiled on every build and
+## self-targets its instruction set per-function via `#pragma GCC target(...)`, then the
+## best kernel is chosen at runtime via CPUID.
+
+SIMDUTF_COPTS = select({
+    # MSVC has no /std:c++17 equivalent spelled the GCC way.
+    ":msvc_like": ["/std:c++17"],
+    "//conditions:default": ["-std=c++17"],
+}) + select({
+    # GCC x86 AVX load/store code-gen workaround.
+    ":gcc_on_x86": [
+        "-mno-avx256-split-unaligned-load",
+        "-mno-avx256-split-unaligned-store",
+    ],
+    "//conditions:default": [],
+}) + select({
+    # PowerPC: required to enable the VSX/AltiVec kernel
+    ":cpu_ppc": [
+        "-maltivec",
+        "-mvsx",
+        "-mcpu=power8",
+    ],
+    "//conditions:default": [],
+}) + select({
+    # LoongArch: required so __loongarch_sx/__loongarch_asx are defined and LSX/LASX turn on.
+    ":cpu_loongarch64": [
+        "-mlsx",
+        "-mlasx",
+    ],
+    "//conditions:default": [],
+})
+
+# RISC-V note: the RVV kernel has no runtime dispatch and is compile-time gated on the V
+# extension, so we add no `-march` here (a forced `-march=rv64gcv` would yield a binary that
+# only runs on V-capable hardware). riscv64 builds correctly on the scalar fallback; opt into
+# RVV with `--copt=-march=rv64gcv`.
+
+SIMDUTF_LOCAL_DEFINES = select({
+    ":with_logging_enabled": ["SIMDUTF_LOGGING=1"],
+    "//conditions:default": [],
+}) + select({
+    ":with_static_initialization_enabled": ["SIMDUTF_USE_STATIC_INITIALIZATION=1"],
+    "//conditions:default": [],
+})
+
+## The simdutf library.
+cc_library(
+    name = "simdutf",
+    srcs = ["src/simdutf.cpp"],
+    hdrs = [
+        "include/simdutf.h",
+        "include/simdutf/avx512.h",
+        "include/simdutf/base64_implementation.h",
+        "include/simdutf/base64_tables.h",
+        "include/simdutf/common_defs.h",
+        "include/simdutf/compiler_check.h",
+        "include/simdutf/constexpr_ptr.h",
+        "include/simdutf/encoding_types.h",
+        "include/simdutf/error.h",
+        "include/simdutf/implementation.h",
+        "include/simdutf/internal/isadetection.h",
+        "include/simdutf/portability.h",
+        "include/simdutf/scalar/ascii.h",
+        "include/simdutf/scalar/atomic_util.h",
+        "include/simdutf/scalar/base64.h",
+        "include/simdutf/scalar/latin1.h",
+        "include/simdutf/scalar/latin1_to_utf16/latin1_to_utf16.h",
+        "include/simdutf/scalar/latin1_to_utf32/latin1_to_utf32.h",
+        "include/simdutf/scalar/latin1_to_utf8/latin1_to_utf8.h",
+        "include/simdutf/scalar/swap_bytes.h",
+        "include/simdutf/scalar/utf16.h",
+        "include/simdutf/scalar/utf16_to_latin1/utf16_to_latin1.h",
+        "include/simdutf/scalar/utf16_to_latin1/valid_utf16_to_latin1.h",
+        "include/simdutf/scalar/utf16_to_utf32/utf16_to_utf32.h",
+        "include/simdutf/scalar/utf16_to_utf32/valid_utf16_to_utf32.h",
+        "include/simdutf/scalar/utf16_to_utf8/utf16_to_utf8.h",
+        "include/simdutf/scalar/utf16_to_utf8/valid_utf16_to_utf8.h",
+        "include/simdutf/scalar/utf32.h",
+        "include/simdutf/scalar/utf32_to_latin1/utf32_to_latin1.h",
+        "include/simdutf/scalar/utf32_to_latin1/valid_utf32_to_latin1.h",
+        "include/simdutf/scalar/utf32_to_utf16/utf32_to_utf16.h",
+        "include/simdutf/scalar/utf32_to_utf16/valid_utf32_to_utf16.h",
+        "include/simdutf/scalar/utf32_to_utf8/utf32_to_utf8.h",
+        "include/simdutf/scalar/utf32_to_utf8/valid_utf32_to_utf8.h",
+        "include/simdutf/scalar/utf8.h",
+        "include/simdutf/scalar/utf8_to_latin1/utf8_to_latin1.h",
+        "include/simdutf/scalar/utf8_to_latin1/valid_utf8_to_latin1.h",
+        "include/simdutf/scalar/utf8_to_utf16/utf8_to_utf16.h",
+        "include/simdutf/scalar/utf8_to_utf16/valid_utf8_to_utf16.h",
+        "include/simdutf/scalar/utf8_to_utf32/utf8_to_utf32.h",
+        "include/simdutf/scalar/utf8_to_utf32/valid_utf8_to_utf32.h",
+        "include/simdutf/simdutf_version.h",
+        "include/simdutf_c.h",
+    ],
+    copts = SIMDUTF_COPTS,
+    includes = [
+        "include",
+        "src",
+    ],
+    local_defines = SIMDUTF_LOCAL_DEFINES,
+    textual_hdrs = [
+        "src/arm64/arm_base64.cpp",
+        "src/arm64/arm_convert_latin1_to_utf16.cpp",
+        "src/arm64/arm_convert_latin1_to_utf32.cpp",
+        "src/arm64/arm_convert_latin1_to_utf8.cpp",
+        "src/arm64/arm_convert_utf16_to_latin1.cpp",
+        "src/arm64/arm_convert_utf16_to_utf32.cpp",
+        "src/arm64/arm_convert_utf16_to_utf8.cpp",
+        "src/arm64/arm_convert_utf32_to_latin1.cpp",
+        "src/arm64/arm_convert_utf32_to_utf16.cpp",
+        "src/arm64/arm_convert_utf32_to_utf8.cpp",
+        "src/arm64/arm_convert_utf8_to_latin1.cpp",
+        "src/arm64/arm_convert_utf8_to_utf16.cpp",
+        "src/arm64/arm_convert_utf8_to_utf32.cpp",
+        "src/arm64/arm_find.cpp",
+        "src/arm64/arm_utf16fix.cpp",
+        "src/arm64/arm_validate_utf16.cpp",
+        "src/arm64/arm_validate_utf32le.cpp",
+        "src/arm64/implementation.cpp",
+        "src/encoding_types.cpp",
+        "src/error.cpp",
+        "src/fallback/implementation.cpp",
+        "src/generic/ascii_validation.h",
+        "src/generic/base64.h",
+        "src/generic/base64lengths.h",
+        "src/generic/buf_block_reader.h",
+        "src/generic/find.h",
+        "src/generic/utf16.h",
+        "src/generic/utf16/change_endianness.h",
+        "src/generic/utf16/count_code_points_bytemask.h",
+        "src/generic/utf16/to_well_formed.h",
+        "src/generic/utf16/utf32_length_from_utf16.h",
+        "src/generic/utf16/utf8_length_from_utf16.h",
+        "src/generic/utf16/utf8_length_from_utf16_bytemask.h",
+        "src/generic/utf32.h",
+        "src/generic/utf8.h",
+        "src/generic/utf8/utf16_length_from_utf8_bytemask.h",
+        "src/generic/utf8_to_latin1/utf8_to_latin1.h",
+        "src/generic/utf8_to_latin1/valid_utf8_to_latin1.h",
+        "src/generic/utf8_to_utf16/utf8_to_utf16.h",
+        "src/generic/utf8_to_utf16/valid_utf8_to_utf16.h",
+        "src/generic/utf8_to_utf32/utf8_to_utf32.h",
+        "src/generic/utf8_to_utf32/valid_utf8_to_utf32.h",
+        "src/generic/utf8_validation/utf8_lookup4_algorithm.h",
+        "src/generic/utf8_validation/utf8_validator.h",
+        "src/generic/validate_utf16.h",
+        "src/generic/validate_utf32.h",
+        "src/haswell/avx2_base64.cpp",
+        "src/haswell/avx2_convert_latin1_to_utf16.cpp",
+        "src/haswell/avx2_convert_latin1_to_utf32.cpp",
+        "src/haswell/avx2_convert_latin1_to_utf8.cpp",
+        "src/haswell/avx2_convert_utf16_to_latin1.cpp",
+        "src/haswell/avx2_convert_utf16_to_utf32.cpp",
+        "src/haswell/avx2_convert_utf16_to_utf8.cpp",
+        "src/haswell/avx2_convert_utf32_to_latin1.cpp",
+        "src/haswell/avx2_convert_utf32_to_utf16.cpp",
+        "src/haswell/avx2_convert_utf32_to_utf8.cpp",
+        "src/haswell/avx2_convert_utf8_to_latin1.cpp",
+        "src/haswell/avx2_convert_utf8_to_utf16.cpp",
+        "src/haswell/avx2_convert_utf8_to_utf32.cpp",
+        "src/haswell/avx2_utf16fix.cpp",
+        "src/haswell/avx2_validate_utf16.cpp",
+        "src/haswell/implementation.cpp",
+        "src/icelake/icelake_ascii_validation.inl.cpp",
+        "src/icelake/icelake_base64.inl.cpp",
+        "src/icelake/icelake_common.inl.cpp",
+        "src/icelake/icelake_convert_latin1_to_utf16.inl.cpp",
+        "src/icelake/icelake_convert_latin1_to_utf32.inl.cpp",
+        "src/icelake/icelake_convert_latin1_to_utf8.inl.cpp",
+        "src/icelake/icelake_convert_utf16_to_latin1.inl.cpp",
+        "src/icelake/icelake_convert_utf16_to_utf32.inl.cpp",
+        "src/icelake/icelake_convert_utf16_to_utf8.inl.cpp",
+        "src/icelake/icelake_convert_utf32_to_latin1.inl.cpp",
+        "src/icelake/icelake_convert_utf32_to_utf16.inl.cpp",
+        "src/icelake/icelake_convert_utf32_to_utf8.inl.cpp",
+        "src/icelake/icelake_convert_utf8_to_latin1.inl.cpp",
+        "src/icelake/icelake_convert_utf8_to_utf16.inl.cpp",
+        "src/icelake/icelake_convert_valid_utf8_to_latin1.inl.cpp",
+        "src/icelake/icelake_find.inl.cpp",
+        "src/icelake/icelake_from_utf8.inl.cpp",
+        "src/icelake/icelake_from_valid_utf8.inl.cpp",
+        "src/icelake/icelake_macros.inl.cpp",
+        "src/icelake/icelake_utf16fix.cpp",
+        "src/icelake/icelake_utf32_validation.inl.cpp",
+        "src/icelake/icelake_utf8_common.inl.cpp",
+        "src/icelake/icelake_utf8_length_from_utf16.inl.cpp",
+        "src/icelake/icelake_utf8_validation.inl.cpp",
+        "src/icelake/implementation.cpp",
+        "src/implementation.cpp",
+        "src/lasx/implementation.cpp",
+        "src/lasx/lasx_base64.cpp",
+        "src/lasx/lasx_convert_latin1_to_utf16.cpp",
+        "src/lasx/lasx_convert_latin1_to_utf32.cpp",
+        "src/lasx/lasx_convert_latin1_to_utf8.cpp",
+        "src/lasx/lasx_convert_utf16_to_latin1.cpp",
+        "src/lasx/lasx_convert_utf16_to_utf32.cpp",
+        "src/lasx/lasx_convert_utf16_to_utf8.cpp",
+        "src/lasx/lasx_convert_utf32_to_latin1.cpp",
+        "src/lasx/lasx_convert_utf32_to_utf16.cpp",
+        "src/lasx/lasx_convert_utf32_to_utf8.cpp",
+        "src/lasx/lasx_convert_utf8_to_latin1.cpp",
+        "src/lasx/lasx_convert_utf8_to_utf16.cpp",
+        "src/lasx/lasx_convert_utf8_to_utf32.cpp",
+        "src/lasx/lasx_find.cpp",
+        "src/lasx/lasx_validate_utf16.cpp",
+        "src/lasx/lasx_validate_utf32le.cpp",
+        "src/lsx/implementation.cpp",
+        "src/lsx/lsx_base64.cpp",
+        "src/lsx/lsx_convert_latin1_to_utf16.cpp",
+        "src/lsx/lsx_convert_latin1_to_utf32.cpp",
+        "src/lsx/lsx_convert_latin1_to_utf8.cpp",
+        "src/lsx/lsx_convert_utf16_to_latin1.cpp",
+        "src/lsx/lsx_convert_utf16_to_utf32.cpp",
+        "src/lsx/lsx_convert_utf16_to_utf8.cpp",
+        "src/lsx/lsx_convert_utf32_to_latin1.cpp",
+        "src/lsx/lsx_convert_utf32_to_utf16.cpp",
+        "src/lsx/lsx_convert_utf32_to_utf8.cpp",
+        "src/lsx/lsx_convert_utf8_to_latin1.cpp",
+        "src/lsx/lsx_convert_utf8_to_utf16.cpp",
+        "src/lsx/lsx_convert_utf8_to_utf32.cpp",
+        "src/lsx/lsx_find.cpp",
+        "src/lsx/lsx_validate_utf16.cpp",
+        "src/lsx/lsx_validate_utf32le.cpp",
+        "src/ppc64/implementation.cpp",
+        "src/ppc64/ppc64_base64.cpp",
+        "src/ppc64/ppc64_base64_internal_tests.cpp",
+        "src/ppc64/ppc64_convert_latin1_to_utf16.cpp",
+        "src/ppc64/ppc64_convert_latin1_to_utf32.cpp",
+        "src/ppc64/ppc64_convert_latin1_to_utf8.cpp",
+        "src/ppc64/ppc64_convert_utf16_to_latin1.cpp",
+        "src/ppc64/ppc64_convert_utf16_to_utf32.cpp",
+        "src/ppc64/ppc64_convert_utf16_to_utf8.cpp",
+        "src/ppc64/ppc64_convert_utf32_to_latin1.cpp",
+        "src/ppc64/ppc64_convert_utf32_to_utf16.cpp",
+        "src/ppc64/ppc64_convert_utf32_to_utf8.cpp",
+        "src/ppc64/ppc64_convert_utf8_to_latin1.cpp",
+        "src/ppc64/ppc64_convert_utf8_to_utf16.cpp",
+        "src/ppc64/ppc64_convert_utf8_to_utf32.cpp",
+        "src/ppc64/ppc64_utf16_to_utf8_tables.h",
+        "src/ppc64/ppc64_utf8_length_from_latin1.cpp",
+        "src/ppc64/ppc64_validate_utf16.cpp",
+        "src/ppc64/ppc64_write_to_utf8.cpp",
+        "src/ppc64/templates.cpp",
+        "src/rvv/implementation.cpp",
+        "src/rvv/rvv_find.cpp",
+        "src/rvv/rvv_helpers.inl.cpp",
+        "src/rvv/rvv_latin1_to.inl.cpp",
+        "src/rvv/rvv_length_from.inl.cpp",
+        "src/rvv/rvv_utf16_to.inl.cpp",
+        "src/rvv/rvv_utf16fix.cpp",
+        "src/rvv/rvv_utf32_to.inl.cpp",
+        "src/rvv/rvv_utf8_to.inl.cpp",
+        "src/rvv/rvv_validate.inl.cpp",
+        "src/simdutf/arm64.h",
+        "src/simdutf/arm64/begin.h",
+        "src/simdutf/arm64/bitmanipulation.h",
+        "src/simdutf/arm64/end.h",
+        "src/simdutf/arm64/implementation.h",
+        "src/simdutf/arm64/intrinsics.h",
+        "src/simdutf/arm64/simd.h",
+        "src/simdutf/arm64/simd16-inl.h",
+        "src/simdutf/arm64/simd32-inl.h",
+        "src/simdutf/arm64/simd64-inl.h",
+        "src/simdutf/fallback.h",
+        "src/simdutf/fallback/begin.h",
+        "src/simdutf/fallback/bitmanipulation.h",
+        "src/simdutf/fallback/end.h",
+        "src/simdutf/fallback/implementation.h",
+        "src/simdutf/haswell.h",
+        "src/simdutf/haswell/begin.h",
+        "src/simdutf/haswell/bitmanipulation.h",
+        "src/simdutf/haswell/end.h",
+        "src/simdutf/haswell/implementation.h",
+        "src/simdutf/haswell/intrinsics.h",
+        "src/simdutf/haswell/simd.h",
+        "src/simdutf/haswell/simd16-inl.h",
+        "src/simdutf/haswell/simd32-inl.h",
+        "src/simdutf/haswell/simd64-inl.h",
+        "src/simdutf/icelake.h",
+        "src/simdutf/icelake/begin.h",
+        "src/simdutf/icelake/bitmanipulation.h",
+        "src/simdutf/icelake/end.h",
+        "src/simdutf/icelake/implementation.h",
+        "src/simdutf/icelake/intrinsics.h",
+        "src/simdutf/icelake/simd.h",
+        "src/simdutf/icelake/simd16-inl.h",
+        "src/simdutf/icelake/simd32-inl.h",
+        "src/simdutf/lasx.h",
+        "src/simdutf/lasx/begin.h",
+        "src/simdutf/lasx/bitmanipulation.h",
+        "src/simdutf/lasx/end.h",
+        "src/simdutf/lasx/implementation.h",
+        "src/simdutf/lasx/intrinsics.h",
+        "src/simdutf/lasx/simd.h",
+        "src/simdutf/lasx/simd16-inl.h",
+        "src/simdutf/lasx/simd32-inl.h",
+        "src/simdutf/lasx/simd64-inl.h",
+        "src/simdutf/lsx.h",
+        "src/simdutf/lsx/begin.h",
+        "src/simdutf/lsx/bitmanipulation.h",
+        "src/simdutf/lsx/end.h",
+        "src/simdutf/lsx/implementation.h",
+        "src/simdutf/lsx/intrinsics.h",
+        "src/simdutf/lsx/simd.h",
+        "src/simdutf/lsx/simd16-inl.h",
+        "src/simdutf/lsx/simd32-inl.h",
+        "src/simdutf/lsx/simd64-inl.h",
+        "src/simdutf/ppc64.h",
+        "src/simdutf/ppc64/begin.h",
+        "src/simdutf/ppc64/bitmanipulation.h",
+        "src/simdutf/ppc64/end.h",
+        "src/simdutf/ppc64/implementation.h",
+        "src/simdutf/ppc64/intrinsics.h",
+        "src/simdutf/ppc64/simd.h",
+        "src/simdutf/ppc64/simd16-inl.h",
+        "src/simdutf/ppc64/simd32-inl.h",
+        "src/simdutf/ppc64/simd8-inl.h",
+        "src/simdutf/rvv.h",
+        "src/simdutf/rvv/begin.h",
+        "src/simdutf/rvv/end.h",
+        "src/simdutf/rvv/implementation.h",
+        "src/simdutf/rvv/intrinsics.h",
+        "src/simdutf/westmere.h",
+        "src/simdutf/westmere/begin.h",
+        "src/simdutf/westmere/bitmanipulation.h",
+        "src/simdutf/westmere/end.h",
+        "src/simdutf/westmere/implementation.h",
+        "src/simdutf/westmere/intrinsics.h",
+        "src/simdutf/westmere/simd.h",
+        "src/simdutf/westmere/simd16-inl.h",
+        "src/simdutf/westmere/simd32-inl.h",
+        "src/simdutf/westmere/simd64-inl.h",
+        "src/simdutf_c.cpp",
+        "src/tables/utf16_to_utf8_tables.h",
+        "src/tables/utf32_to_utf16_tables.h",
+        "src/tables/utf8_to_utf16_tables.h",
+        "src/westmere/implementation.cpp",
+        "src/westmere/internal/loader.cpp",
+        "src/westmere/internal/write_v_u16_11bits_to_utf8.cpp",
+        "src/westmere/sse_base64.cpp",
+        "src/westmere/sse_convert_latin1_to_utf16.cpp",
+        "src/westmere/sse_convert_latin1_to_utf32.cpp",
+        "src/westmere/sse_convert_latin1_to_utf8.cpp",
+        "src/westmere/sse_convert_utf16_to_latin1.cpp",
+        "src/westmere/sse_convert_utf16_to_utf32.cpp",
+        "src/westmere/sse_convert_utf16_to_utf8.cpp",
+        "src/westmere/sse_convert_utf32_to_latin1.cpp",
+        "src/westmere/sse_convert_utf32_to_utf16.cpp",
+        "src/westmere/sse_convert_utf32_to_utf8.cpp",
+        "src/westmere/sse_convert_utf8_to_latin1.cpp",
+        "src/westmere/sse_convert_utf8_to_utf16.cpp",
+        "src/westmere/sse_convert_utf8_to_utf32.cpp",
+        "src/westmere/sse_utf16fix.cpp",
+        "src/westmere/sse_validate_utf16.cpp",
+    ],
+    visibility = ["//visibility:public"],
+)

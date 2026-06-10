@@ -11,6 +11,7 @@
   - [Requirements](#requirements)
   - [Usage (Usage)](#usage-usage)
   - [Usage (CMake)](#usage-cmake)
+  - [Usage (Bazel)](#usage-bazel)
   - [Single-header version](#single-header-version)
   - [Single-header version with limited features](#single-header-version-with-limited-features)
   - [Packages](#packages)
@@ -185,7 +186,38 @@ To use the library as a CMake dependency in your project, please see `tests/inst
 
 You may also use a package manager. E.g.,  [we have a complete example using vcpkg](https://github.com/simdutf/simdutf-vcpkg).
 
+### Usage (Bazel)
 
+simdutf can be built with [Bazel](https://bazel.build/) (bzlmod). Add it to your `MODULE.bazel`:
+
+```starlark
+bazel_dep(name = "simdutf")  # add version = "x.y.z" to pin a specific version
+git_override(
+    module_name = "simdutf",
+    remote = "https://github.com/simdutf/simdutf",
+    # pin to a commit for reproducible builds; branch shown here for convenience
+    branch = "master",
+)
+```
+
+and depend on `@simdutf//:simdutf`. The same library serves both C++ and C consumers
+(C code includes `simdutf_c.h`):
+
+```starlark
+# C++ consumer
+cc_binary(name = "app",   srcs = ["app.cpp"], deps = ["@simdutf//:simdutf"])
+# C consumer (includes simdutf_c.h)
+cc_binary(name = "app_c", srcs = ["app.c"],   deps = ["@simdutf//:simdutf"])
+```
+
+The Bazel build relies on simdutf's runtime CPU dispatch, so no architecture flags are
+needed on x86-64 or arm64. The VSX/AltiVec (PowerPC) and LSX/LASX (LoongArch) kernels are
+enabled automatically based on the target `@platforms//cpu`. RISC-V builds use the portable
+scalar fallback by default; to enable the RVV kernel (which has no runtime guard, so the
+resulting binary requires V-capable hardware), build with `--copt=-march=rv64gcv`.
+
+Two optional feature flags are available: `--//:with_logging` and
+`--//:with_static_initialization`.
 
 ## Single-header version
 

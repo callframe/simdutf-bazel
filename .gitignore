@@ -23,5 +23,8 @@ singleheader/singleheader.zip
 .cache/clangd/
 corpus/
 
+# bazel
+/bazel-*
+
 # generated documentation
 README.generated.md
